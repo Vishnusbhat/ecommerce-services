@@ -59,8 +59,16 @@ def handle_event(raw: bytes) -> None:
 
 def _send_to_dlq(producer: Producer, msg, error: str) -> None:
     logger.error(
-        "sending_to_dlq topic=%s partition=%s offset=%s error=%s",
-        msg.topic(), msg.partition(), msg.offset(), error,
+        "sending_to_dlq",
+        extra={
+            "extra": {
+                "job": "kafka-consumer",
+                "topic": msg.topic(),
+                "partition": msg.partition(),
+                "kafka_offset": msg.offset(),
+                "error": error,
+            }
+        },
     )
     producer.produce(
         settings.kafka_order_events_dlq_topic,
@@ -106,7 +114,19 @@ def run_consumer(stop_event: threading.Event) -> None:
             except Exception as exc:
                 attempts = retry_counts.get(msg_id, 0) + 1
                 retry_counts[msg_id] = attempts
-                logger.warning("processing_failed attempt=%s msg=%s error=%s", attempts, msg_id, exc)
+                logger.warning(
+                    "processing_failed",
+                    extra={
+                        "extra": {
+                            "job": "kafka-consumer",
+                            "topic": msg.topic(),
+                            "partition": msg.partition(),
+                            "kafka_offset": msg.offset(),
+                            "attempt": attempts,
+                            "error": str(exc),
+                        }
+                    },
+                )
 
                 if attempts >= settings.max_processing_attempts:
                     _send_to_dlq(producer, msg, str(exc))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, Query, status
@@ -11,11 +12,22 @@ from app import clients
 from app.config import settings
 from app.db import get_db
 from app.kafka_producer import publish_order_event
+from app.metrics import (
+    ORDER_AMOUNT_CENTS,
+    ORDERS_CREATED_TOTAL,
+    ORDERS_FAILED_TOTAL,
+    ORDERS_PAID_TOTAL,
+    SAGA_PAYMENT_FAILURES_TOTAL,
+    SAGA_STOCK_RESERVATION_FAILURES_TOTAL,
+    normalize_failure_reason,
+)
 from app.models import Order, OrderItem, OrderStatus
 from app.schemas import CreateOrderRequest, OrderItemOut, OrderListOut, OrderOut
 from app.security import current_user_dependency
 from gestalt_shared.errors import AppError
 from gestalt_shared.security import TokenClaims
+
+logger = logging.getLogger("gestalt.order-service.saga")
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -51,6 +63,8 @@ def create_order(
         select(Order).where(Order.idempotency_key == idempotency_key)
     ).scalar_one_or_none()
     if existing:
+        # Idempotent replay: the original request already ran the saga
+        # (including its cart-clear call), so this path doesn't repeat it.
         return _to_out(existing, _load_items(db, existing.id))
 
     # ---- 1. Resolve items (explicit body, else the caller's cart) ----
@@ -87,6 +101,7 @@ def create_order(
             return _to_out(existing, _load_items(db, existing.id))
         raise
 
+    ORDERS_CREATED_TOTAL.inc()
     publish_order_event(
         "order.created",
         order.id,
@@ -112,15 +127,29 @@ def create_order(
     if reservation_failure:
         # Compensate whatever was reserved before the failure.
         for product_id, quantity in reserved_so_far:
-            clients.release_stock(product_id, quantity, order.id)
+            clients.release_stock(product_id, quantity, order.id, reason="reservation_failed_partial_rollback")
         order.status = OrderStatus.FAILED
-        order.failure_reason = reservation_failure
+        order.failure_reason = normalize_failure_reason(reservation_failure)
         db.commit()
+        SAGA_STOCK_RESERVATION_FAILURES_TOTAL.inc()
+        ORDERS_FAILED_TOTAL.labels(reason=order.failure_reason).inc()
+        logger.info(
+            "saga_transition",
+            extra={
+                "extra": {
+                    "order_id": order.id,
+                    "from_status": "PENDING",
+                    "to_status": "FAILED",
+                    "reason": order.failure_reason,
+                }
+            },
+        )
         publish_order_event(
             "order.failed",
             order.id,
-            {"orderId": order.id, "userId": order.user_id, "reason": reservation_failure},
+            {"orderId": order.id, "userId": order.user_id, "reason": order.failure_reason},
         )
+        clients.clear_cart_items(order.user_id, [p for p, _ in raw_items])
         return _to_out(order, _load_items(db, order.id))
 
     order.stock_reserved = True
@@ -131,19 +160,39 @@ def create_order(
 
     if not charge_result.get("charged"):
         for product_id, quantity in raw_items:
-            clients.release_stock(product_id, quantity, order.id)
+            clients.release_stock(product_id, quantity, order.id, reason="payment_failed")
         order.status = OrderStatus.FAILED
-        order.failure_reason = charge_result.get("reason", "payment_failed")
+        order.failure_reason = normalize_failure_reason(charge_result.get("reason", "payment_failed"))
         db.commit()
+        SAGA_PAYMENT_FAILURES_TOTAL.inc()
+        ORDERS_FAILED_TOTAL.labels(reason=order.failure_reason).inc()
+        logger.info(
+            "saga_transition",
+            extra={
+                "extra": {
+                    "order_id": order.id,
+                    "from_status": "PENDING",
+                    "to_status": "FAILED",
+                    "reason": order.failure_reason,
+                }
+            },
+        )
         publish_order_event(
             "order.failed",
             order.id,
             {"orderId": order.id, "userId": order.user_id, "reason": order.failure_reason},
         )
+        clients.clear_cart_items(order.user_id, [p for p, _ in raw_items])
         return _to_out(order, _load_items(db, order.id))
 
     order.status = OrderStatus.PAID
     db.commit()
+    ORDERS_PAID_TOTAL.inc()
+    ORDER_AMOUNT_CENTS.observe(order.amount_cents)
+    logger.info(
+        "saga_transition",
+        extra={"extra": {"order_id": order.id, "from_status": "PENDING", "to_status": "PAID"}},
+    )
     publish_order_event(
         "order.paid",
         order.id,
@@ -154,6 +203,7 @@ def create_order(
             "paidAt": datetime.now(timezone.utc).isoformat(),
         },
     )
+    clients.clear_cart_items(order.user_id, [p for p, _ in raw_items])
     return _to_out(order, _load_items(db, order.id))
 
 

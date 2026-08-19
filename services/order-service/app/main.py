@@ -1,5 +1,4 @@
 import asyncio
-import logging
 
 from fastapi import FastAPI
 
@@ -10,16 +9,19 @@ from app.reconciliation import reconciliation_loop
 from app.routers.orders import router as orders_router
 from gestalt_shared.errors import install_error_handlers
 from gestalt_shared.health import build_health_router
+from gestalt_shared.logging import configure_logging
 from gestalt_shared.metrics import setup_metrics
 from gestalt_shared.middleware import RequestIdMiddleware
 
-logging.basicConfig(level=settings.log_level.upper())
+configure_logging("order-service", settings.log_level)
 
 app = FastAPI(title="order-service")
 
-app.add_middleware(RequestIdMiddleware)
 install_error_handlers(app)
 setup_metrics(app, "order-service")
+# Must be outermost -- see auth-service/app/main.py for why (BaseHTTPMiddleware
+# task-boundary + contextvar propagation).
+app.add_middleware(RequestIdMiddleware)
 app.include_router(build_health_router(ready_check=db_is_ready))
 app.include_router(orders_router)
 

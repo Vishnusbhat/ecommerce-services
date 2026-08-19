@@ -13,3 +13,11 @@ class CartOut(BaseModel):
 class AddItemRequest(BaseModel):
     productId: str
     quantity: int = Field(gt=0)
+
+
+class BatchRemoveRequest(BaseModel):
+    productIds: list[str]
+
+
+class BatchRemoveResponse(BaseModel):
+    removed: list[str]

@@ -1,7 +1,10 @@
 .env
+.env.*.bak
+.env.unsafe-test-backup
 __pycache__/
 *.pyc
 .venv/
+.venv-test/
 venv/
 *.egg-info/
 .pytest_cache/

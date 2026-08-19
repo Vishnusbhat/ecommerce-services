@@ -396,9 +396,8 @@ written:
   notify+review-eligibility→review journey against the fresh stack
   end-to-end successfully.
 
-No automated test suite exists yet — all verification above was done via
-`curl`/`docker compose exec` against live containers, not `pytest`. The
-`tests/` directory in each service is currently empty (see §9).
+An automated `pytest` suite now exists covering all of the above (18 tests)
+plus the separate unsafe-idempotency-mode regression test — see §11.
 
 ---
 
@@ -425,8 +424,6 @@ Prometheus/Grafana, K6, Terraform) has been built yet.
 
 ## 9. Known gaps / explicitly not done
 
-- **No automated tests.** `tests/` directories exist but are empty. All
-  verification so far is manual/live against running containers (§7).
 - **No K8s manifests** (Deployments, Services, ConfigMaps, Secrets,
   StatefulSets, NetworkPolicy, HPA) — `docs/03-kubernetes-deployment.md` is
   entirely unimplemented.
@@ -450,9 +447,6 @@ Prometheus/Grafana, K6, Terraform) has been built yet.
   reference script; it hasn't been adapted/run against this stack).
 - **No Terraform / EKS provisioning** — entirely deferred, per the roadmap
   itself ("Week 6").
-- **Cart is never cleared after a successful checkout** — see §6
-  (cart-service), a deliberate consequence of the "zero events" scoping in
-  the docs, flagged as a real production gap worth revisiting.
 - **`docker-compose.yml` maps MariaDB to host port `3307`**, not `3306`
   (a local MariaDB install on the dev machine already owned 3306) — cosmetic,
   but worth knowing if scripting against the host-exposed port directly.
@@ -470,10 +464,57 @@ docker compose up -d --build
 All 7 services will be reachable at `localhost:8001`–`8007` (see the table
 in §6 or the README for the exact mapping). `docker compose logs -f
 <service>` for any service's logs; `docker compose down -v` for a full
-clean-slate reset (wipes all data).
+clean-slate reset (wipes all data). `./scripts/run_tests.sh` runs the full
+automated suite (§11); `./scripts/test_unsafe_idempotency.sh` runs the
+separate unsafe-idempotency-mode regression test.
 
 The natural next slice, following the roadmap in `docs/09`, is **Week 3**:
 standing up Istio locally (or on the eventual K8s target) and replacing the
 two app-level substitutions in §5 with the real mesh primitives — but this
 file exists so that decision, and everything after it, can be made fresh in
 whatever session picks this up next.
+
+---
+
+## 11. Addendum: app-layer completion pass (`NEXT_STEP_REQUIREMENTS.md`)
+
+A follow-up pass closed every gap this document originally flagged in §9
+except the K8s/Istio/observability/GitOps/K6/Terraform ones (explicitly out
+of scope for that pass too — see its own §7 Non-Goals). Implemented, in
+priority order, and verified live against the full docker-compose stack:
+
+1. **Business metrics** on every service's existing `/metrics` endpoint:
+   `orders_created_total`/`orders_paid_total`/`orders_failed_total{reason}`/
+   `saga_stock_reservation_failures_total`/`saga_payment_failures_total`/
+   `order_amount_cents` (order-service); `cart_items_added_total`/
+   `cart_abandonment_total` (cart-service, new background scan job);
+   `payment_failures_total{reason}`/`payment_idempotent_replays_total`
+   (payment-service); `stock_reservation_conflicts_total`/
+   `catalog_cache_hits_total`/`catalog_cache_misses_total`
+   (catalog-service). `orders.failure_reason` now stores one of 5 canonical
+   uppercase values (`INSUFFICIENT_STOCK`/`PRODUCT_NOT_FOUND`/
+   `PAYMENT_DECLINED`/`TRANSPORT_ERROR`/`RECONCILIATION_TIMEOUT`) instead of
+   free-text, so the DB value and the Prometheus label can never drift apart
+   — a small, deliberate change to `POST /orders`'s response shape.
+2. **Request-id propagation**: `gestalt_shared/http_client.py`'s client
+   factory auto-attaches `x-request-id` to every inter-service call.
+   Verified live: one checkout's request id appeared identically across
+   order-service, catalog-service (both reserve and its compensating
+   release), and payment-service's logs for that request.
+3. **Cart clearing after checkout**: new internal `DELETE
+   /cart/items:batch` on cart-service; order-service calls it after every
+   saga terminal state (`PAID` or `FAILED` — including reservation
+   failures, payment declines, and the reconciliation job's force-fails),
+   fire-and-forget.
+4. **Structured JSON logging** on every service
+   (`gestalt_shared/logging.py`), request-id-correlated during request
+   handling and job/consumer-correlated otherwise (reconciliation, delivery
+   simulation, cart abandonment, Kafka consumer retries/DLQ forwards).
+5. **Automated `pytest` suite** (18 tests, one file per service under each
+   service's `tests/` dir) plus a separate unsafe-idempotency-mode
+   regression test, both runnable via `scripts/run_tests.sh` and
+   `scripts/test_unsafe_idempotency.sh` respectively — see the README for
+   exact commands and what each covers.
+
+See `NEXT_STEP_REQUIREMENTS.md` for the full original spec this pass
+implemented, including the reasoning behind each design decision.

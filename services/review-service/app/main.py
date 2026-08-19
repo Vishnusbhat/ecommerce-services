@@ -1,4 +1,3 @@
-import logging
 import threading
 
 from fastapi import FastAPI
@@ -9,16 +8,19 @@ from app.db import mongo_is_ready
 from app.routers.reviews import router as reviews_router
 from gestalt_shared.errors import install_error_handlers
 from gestalt_shared.health import build_health_router
+from gestalt_shared.logging import configure_logging
 from gestalt_shared.metrics import setup_metrics
 from gestalt_shared.middleware import RequestIdMiddleware
 
-logging.basicConfig(level=settings.log_level.upper())
+configure_logging("review-service", settings.log_level)
 
 app = FastAPI(title="review-service")
 
-app.add_middleware(RequestIdMiddleware)
 install_error_handlers(app)
 setup_metrics(app, "review-service")
+# Must be outermost -- see auth-service/app/main.py for why (BaseHTTPMiddleware
+# task-boundary + contextvar propagation).
+app.add_middleware(RequestIdMiddleware)
 app.include_router(
     build_health_router(ready_check=lambda: mongo_is_ready() and kafka_is_ready() and consumer_is_ready())
 )

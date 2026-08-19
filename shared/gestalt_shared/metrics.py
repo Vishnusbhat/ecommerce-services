@@ -7,6 +7,7 @@ middleware fills the same role (request rate/duration/error split) plus a
 """
 from __future__ import annotations
 
+import logging
 import time
 
 from fastapi import FastAPI
@@ -14,6 +15,8 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
+
+logger = logging.getLogger("gestalt.http")
 
 HTTP_REQUESTS_TOTAL = Counter(
     "http_requests_total", "Total HTTP requests", ["service", "method", "path", "status"]
@@ -35,6 +38,22 @@ class MetricsMiddleware(BaseHTTPMiddleware):
         path = request.scope.get("route").path if request.scope.get("route") else request.url.path
         HTTP_REQUESTS_TOTAL.labels(self.service_name, request.method, path, response.status_code).inc()
         HTTP_REQUEST_DURATION.labels(self.service_name, request.method, path).observe(duration)
+        # Logged *after* call_next returns: RequestIdMiddleware (which wraps
+        # inside this one) sets the request-id contextvar during that call,
+        # and both middlewares share one asyncio context for the request (no
+        # task boundary between them), so it's already populated here
+        # regardless of add_middleware registration order.
+        logger.info(
+            "request_completed",
+            extra={
+                "extra": {
+                    "method": request.method,
+                    "path": path,
+                    "status": response.status_code,
+                    "duration_ms": round(duration * 1000, 2),
+                }
+            },
+        )
         return response
 
 

@@ -1,4 +1,3 @@
-import logging
 import threading
 
 from fastapi import FastAPI
@@ -7,16 +6,19 @@ from app.config import settings
 from app.consumer import consumer_is_ready, kafka_is_ready, run_consumer
 from gestalt_shared.errors import install_error_handlers
 from gestalt_shared.health import build_health_router
+from gestalt_shared.logging import configure_logging
 from gestalt_shared.metrics import setup_metrics
 from gestalt_shared.middleware import RequestIdMiddleware
 
-logging.basicConfig(level=settings.log_level.upper())
+configure_logging("notification-service", settings.log_level)
 
 app = FastAPI(title="notification-service")
 
-app.add_middleware(RequestIdMiddleware)
 install_error_handlers(app)
 setup_metrics(app, "notification-service")
+# Must be outermost -- see auth-service/app/main.py for why (BaseHTTPMiddleware
+# task-boundary + contextvar propagation).
+app.add_middleware(RequestIdMiddleware)
 app.include_router(build_health_router(ready_check=lambda: kafka_is_ready() and consumer_is_ready()))
 
 _stop_event = threading.Event()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from fastapi import APIRouter, Depends, Query
+from prometheus_client import Counter
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
@@ -23,6 +24,12 @@ from gestalt_shared.errors import AppError
 from gestalt_shared.internal_auth import make_internal_caller_dependency
 
 router = APIRouter(prefix="/catalog", tags=["catalog"])
+
+STOCK_RESERVATION_CONFLICTS_TOTAL = Counter(
+    "stock_reservation_conflicts_total", "POST /catalog/stock/reserve calls that hit 409 INSUFFICIENT_STOCK"
+)
+CATALOG_CACHE_HITS_TOTAL = Counter("catalog_cache_hits_total", "Product-read cache-aside hits")
+CATALOG_CACHE_MISSES_TOTAL = Counter("catalog_cache_misses_total", "Product-read cache-aside misses")
 
 require_order_service = make_internal_caller_dependency(
     settings.internal_service_token, allowed_callers=["order-service"]
@@ -45,7 +52,9 @@ def list_products(
     cache_key = f"products:list:{limit}:{offset}"
     cached = redis_client.get(cache_key)
     if cached:
+        CATALOG_CACHE_HITS_TOTAL.inc()
         return ProductListOut(**json.loads(cached))
+    CATALOG_CACHE_MISSES_TOTAL.inc()
 
     total = db.execute(select(Product)).scalars().all()
     page = db.execute(select(Product).order_by(Product.id).limit(limit).offset(offset)).scalars().all()
@@ -60,7 +69,9 @@ def list_products(
 def get_product(product_id: str, db: Session = Depends(get_db)):
     cached = get_cached_product(product_id)
     if cached:
+        CATALOG_CACHE_HITS_TOTAL.inc()
         return ProductOut(**cached)
+    CATALOG_CACHE_MISSES_TOTAL.inc()
 
     product = db.get(Product, product_id)
     if product is None:
@@ -92,6 +103,7 @@ def reserve_stock(body: ReserveRequest):
         if row is None:
             raise AppError("PRODUCT_NOT_FOUND", f"No product with id {body.productId}", 404)
         if row.stock < body.quantity:
+            STOCK_RESERVATION_CONFLICTS_TOTAL.inc()
             raise AppError(
                 "INSUFFICIENT_STOCK", "Requested quantity exceeds available stock", 409
             )

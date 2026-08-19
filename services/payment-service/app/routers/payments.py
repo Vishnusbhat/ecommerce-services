@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import random
 import time
 from datetime import datetime, timezone
@@ -14,6 +15,8 @@ from app.schemas import ChargeRequest, ChargeResponse
 from gestalt_shared.errors import AppError
 from gestalt_shared.internal_auth import make_internal_caller_dependency
 
+logger = logging.getLogger("gestalt.payment-service")
+
 router = APIRouter(prefix="/payments", tags=["payments"])
 
 require_order_service = make_internal_caller_dependency(
@@ -22,6 +25,10 @@ require_order_service = make_internal_caller_dependency(
 
 PAYMENT_FAILURES_TOTAL = Counter(
     "payment_failures_total", "Synthetic/processed payment failures", ["reason"]
+)
+PAYMENT_IDEMPOTENT_REPLAYS_TOTAL = Counter(
+    "payment_idempotent_replays_total",
+    "Charge requests served from the idempotency cache instead of freshly processed",
 )
 
 
@@ -35,7 +42,7 @@ def _process_charge(body: ChargeRequest) -> dict:
         time.sleep(latency_s)
 
     if random.random() < settings.failure_rate:
-        PAYMENT_FAILURES_TOTAL.labels(reason="synthetic_decline").inc()
+        PAYMENT_FAILURES_TOTAL.labels(reason="SYNTHETIC_DECLINE").inc()
         return {
             "success": False,
             "code": "PAYMENT_DECLINED",
@@ -87,6 +94,11 @@ def charge(body: ChargeRequest):
         # the GET-miss check and both charge. Never enable outside a chaos demo.
         existing = redis_client.get(key)
         if existing:
+            PAYMENT_IDEMPOTENT_REPLAYS_TOTAL.inc()
+            logger.info(
+                "idempotent_replay",
+                extra={"extra": {"idempotency_key": body.idempotencyKey, "mode": "unsafe"}},
+            )
             return _respond(body.idempotencyKey, json.loads(existing))
         result = _process_charge(body)
         redis_client.set(key, json.dumps(result), ex=settings.idempotency_ttl_seconds)
@@ -98,6 +110,11 @@ def charge(body: ChargeRequest):
     )
     if not claimed:
         result = _wait_for_result(body.idempotencyKey)
+        PAYMENT_IDEMPOTENT_REPLAYS_TOTAL.inc()
+        logger.info(
+            "idempotent_replay",
+            extra={"extra": {"idempotency_key": body.idempotencyKey, "mode": "safe"}},
+        )
         return _respond(body.idempotencyKey, result)
 
     result = _process_charge(body)
