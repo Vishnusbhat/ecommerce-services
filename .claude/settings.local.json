@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker --version)",
+      "Bash(docker compose *)",
+      "Bash(curl -sf http://localhost:8001/healthz/ready)",
+      "Bash(curl -sf http://localhost:8001/auth/.well-known/jwks.json)",
+      "Bash(curl -s -X POST http://localhost:8001/auth/register -H 'Content-Type: application/json' -d '{\"email\":\"test@example.com\",\"password\":\"password123\"}')",
+      "Bash(curl -s -X POST http://localhost:8001/auth/login -H 'Content-Type: application/json' -d '{\"email\":\"test@example.com\",\"password\":\"password123\"}')",
+      "Bash(curl -s http://localhost:8001/healthz/ready)",
+      "Bash(curl -s http://localhost:8001/auth/.well-known/jwks.json)",
+      "Bash(curl -s http://localhost:8002/healthz/ready)",
+      "Bash(curl -s \"http://localhost:8002/catalog/products?limit=5\")",
+      "Bash(curl -s http://localhost:8002/catalog/products/P001)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8002/catalog/products/NOPE)",
+      "Bash(curl -s -X POST http://localhost:8002/catalog/stock/reserve -H 'Content-Type: application/json' -d '{\"productId\":\"P001\",\"quantity\":2,\"orderId\":\"O1\"}')",
+      "Bash(curl -s http://localhost:8005/healthz/ready)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" -X POST http://localhost:8005/payments/charge -H 'Content-Type: application/json' -d '{\"orderId\":\"O1\",\"amount\":4599,\"currency\":\"INR\",\"idempotencyKey\":\"key-1\"}')",
+      "Bash(curl -s -X POST http://localhost:8005/payments/charge -H 'X-Internal-Token: __TRACKED_VAR__' -H 'X-Internal-Caller: order-service' -H 'Content-Type: application/json' -d '{\"orderId\":\"O1\",\"amount\":4599,\"currency\":\"INR\",\"idempotencyKey\":\"key-1\"}')",
+      "Bash(curl -s -X POST http://localhost:8005/payments/charge -H 'X-Internal-Token: __TRACKED_VAR__' -H 'X-Internal-Caller: order-service' -H 'Content-Type: application/json' -d '{\"orderId\":\"O1\",\"amount\":9999,\"currency\":\"INR\",\"idempotencyKey\":\"key-1\"}')",
+      "Bash(curl -s http://localhost:8005/payments/key-1 -H 'X-Internal-Token: __TRACKED_VAR__' -H 'X-Internal-Caller: order-service')",
+      "Bash(curl -s http://localhost:8004/healthz/ready)",
+      "Bash(curl -s http://localhost:8007/healthz/ready)",
+      "Bash(grep -v \"^DELIVERY_SIMULATION_DELAY_SECONDS=5$\\\\|^DELIVERY_CHECK_INTERVAL_SECONDS=3$\" .env)"
+    ]
+  }
+}

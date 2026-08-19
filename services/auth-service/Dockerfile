@@ -1,0 +1,17 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY shared/requirements.txt /app/shared-requirements.txt
+COPY services/auth-service/requirements.txt /app/service-requirements.txt
+RUN pip install --no-cache-dir -r /app/shared-requirements.txt -r /app/service-requirements.txt
+
+COPY shared/gestalt_shared /app/gestalt_shared
+COPY services/auth-service/app /app/app
+
+ENV PYTHONPATH=/app
+ENV KEYS_DIR=/app/keys
+RUN mkdir -p /app/keys
+
+EXPOSE 8080
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]

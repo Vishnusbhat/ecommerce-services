@@ -1,0 +1,217 @@
+name: gestalt-commerce
+
+networks:
+  gestalt-net:
+    name: gestalt-net
+
+volumes:
+  mariadb-data:
+  mongodb-data:
+  kafka-data:
+  auth-keys:
+
+services:
+  # ---------------------------------------------------------------- data layer
+  mariadb:
+    image: mariadb:11
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD}
+    ports: ["3307:3306"]
+    volumes:
+      - mariadb-data:/var/lib/mysql
+      - ./infra/mariadb-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [gestalt-net]
+
+  redis-auth:
+    image: redis:7-alpine
+    healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 5s, timeout: 3s, retries: 10 }
+    networks: [gestalt-net]
+
+  redis-catalog:
+    image: redis:7-alpine
+    healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 5s, timeout: 3s, retries: 10 }
+    networks: [gestalt-net]
+
+  redis-cart:
+    image: redis:7-alpine
+    healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 5s, timeout: 3s, retries: 10 }
+    networks: [gestalt-net]
+
+  redis-payment:
+    image: redis:7-alpine
+    healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 5s, timeout: 3s, retries: 10 }
+    networks: [gestalt-net]
+
+  mongodb:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+    ports: ["27017:27017"]
+    volumes:
+      - mongodb-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [gestalt-net]
+
+  kafka:
+    image: apache/kafka:3.7.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      CLUSTER_ID: "4L6g3nShT-eMCtK--X86sw"
+    ports: ["29092:29092"]
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [gestalt-net]
+
+  kafka-init:
+    image: apache/kafka:3.7.0
+    depends_on:
+      kafka: { condition: service_healthy }
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic ${KAFKA_ORDER_EVENTS_TOPIC} --partitions 3 --replication-factor 1 \
+          --config retention.ms=604800000
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic ${KAFKA_ORDER_EVENTS_DLQ_TOPIC} --partitions 1 --replication-factor 1 \
+          --config retention.ms=604800000
+        echo "topics ready"
+    networks: [gestalt-net]
+
+  # ------------------------------------------------------------ business services
+  auth-service:
+    build: { context: ., dockerfile: services/auth-service/Dockerfile }
+    env_file: .env
+    environment:
+      MARIADB_HOST: ${MARIADB_HOST}
+      MARIADB_PORT: ${MARIADB_PORT}
+      MARIADB_DB: ${MARIADB_AUTH_DB}
+      MARIADB_USER: ${MARIADB_AUTH_USER}
+      MARIADB_PASSWORD: ${MARIADB_AUTH_PASSWORD}
+      REDIS_HOST: ${REDIS_AUTH_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+    volumes:
+      - auth-keys:/app/keys
+    ports: ["8001:8080"]
+    depends_on:
+      mariadb: { condition: service_healthy }
+      redis-auth: { condition: service_healthy }
+    networks: [gestalt-net]
+
+  catalog-service:
+    build: { context: ., dockerfile: services/catalog-service/Dockerfile }
+    env_file: .env
+    environment:
+      MARIADB_HOST: ${MARIADB_HOST}
+      MARIADB_PORT: ${MARIADB_PORT}
+      MARIADB_DB: ${MARIADB_CATALOG_DB}
+      MARIADB_USER: ${MARIADB_CATALOG_USER}
+      MARIADB_PASSWORD: ${MARIADB_CATALOG_PASSWORD}
+      REDIS_HOST: ${REDIS_CATALOG_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      AUTH_JWKS_URL: http://auth-service:8080/auth/.well-known/jwks.json
+    ports: ["8002:8080"]
+    depends_on:
+      mariadb: { condition: service_healthy }
+      redis-catalog: { condition: service_healthy }
+      auth-service: { condition: service_started }
+    networks: [gestalt-net]
+
+  cart-service:
+    build: { context: ., dockerfile: services/cart-service/Dockerfile }
+    env_file: .env
+    environment:
+      REDIS_HOST: ${REDIS_CART_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      AUTH_JWKS_URL: http://auth-service:8080/auth/.well-known/jwks.json
+      CATALOG_SERVICE_URL: http://catalog-service:8080
+    ports: ["8003:8080"]
+    depends_on:
+      redis-cart: { condition: service_healthy }
+      catalog-service: { condition: service_started }
+    networks: [gestalt-net]
+
+  payment-service:
+    build: { context: ., dockerfile: services/payment-service/Dockerfile }
+    env_file: .env
+    environment:
+      REDIS_HOST: ${REDIS_PAYMENT_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      FAILURE_RATE: ${PAYMENT_FAILURE_RATE}
+      LATENCY_MS_MIN: ${PAYMENT_LATENCY_MS_MIN}
+      LATENCY_MS_MAX: ${PAYMENT_LATENCY_MS_MAX}
+    ports: ["8005:8080"]
+    depends_on:
+      redis-payment: { condition: service_healthy }
+    networks: [gestalt-net]
+
+  order-service:
+    build: { context: ., dockerfile: services/order-service/Dockerfile }
+    env_file: .env
+    environment:
+      MARIADB_HOST: ${MARIADB_HOST}
+      MARIADB_PORT: ${MARIADB_PORT}
+      MARIADB_DB: ${MARIADB_ORDERS_DB}
+      MARIADB_USER: ${MARIADB_ORDERS_USER}
+      MARIADB_PASSWORD: ${MARIADB_ORDERS_PASSWORD}
+      AUTH_JWKS_URL: http://auth-service:8080/auth/.well-known/jwks.json
+      CATALOG_SERVICE_URL: http://catalog-service:8080
+      PAYMENT_SERVICE_URL: http://payment-service:8080
+      CART_SERVICE_URL: http://cart-service:8080
+    ports: ["8004:8080"]
+    depends_on:
+      mariadb: { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully }
+      catalog-service: { condition: service_started }
+      payment-service: { condition: service_started }
+    networks: [gestalt-net]
+
+  notification-service:
+    build: { context: ., dockerfile: services/notification-service/Dockerfile }
+    env_file: .env
+    ports: ["8006:8080"]
+    depends_on:
+      kafka-init: { condition: service_completed_successfully }
+    networks: [gestalt-net]
+
+  review-service:
+    build: { context: ., dockerfile: services/review-service/Dockerfile }
+    env_file: .env
+    environment:
+      MONGO_HOST: ${MONGO_HOST}
+      MONGO_PORT: ${MONGO_PORT}
+      MONGO_USER: ${MONGO_INITDB_ROOT_USERNAME}
+      MONGO_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+      MONGO_DB: ${MONGO_REVIEW_DB}
+      AUTH_JWKS_URL: http://auth-service:8080/auth/.well-known/jwks.json
+    ports: ["8007:8080"]
+    depends_on:
+      mongodb: { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully }
+      auth-service: { condition: service_started }
+    networks: [gestalt-net]
